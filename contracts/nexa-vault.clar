@@ -195,3 +195,108 @@
     (ok true)
   )
 )
+
+;; DECENTRALIZED MARKETPLACE PROTOCOL
+
+;; Create Asset Marketplace Listing
+(define-public (create-listing
+    (token-id uint)
+    (asking-price uint)
+  )
+  (let ((token-data (unwrap! (map-get? nft-registry { token-id: token-id }) ERR_INVALID_TOKEN)))
+    ;; Listing Eligibility Validation
+    (asserts! (validate-price asking-price) ERR_INVALID_PRICE)
+    (asserts! (is-eq tx-sender (get owner token-data)) ERR_NOT_TOKEN_OWNER)
+    (asserts! (not (get is-staked token-data)) ERR_ALREADY_STAKED)
+
+    ;; Marketplace Listing Creation
+    (map-set marketplace-listings { token-id: token-id } {
+      price: asking-price,
+      seller: tx-sender,
+      is-active: true,
+      listing-height: stacks-block-height,
+    })
+    (ok true)
+  )
+)
+
+;; Execute Atomic Purchase Transaction
+(define-public (execute-purchase (token-id uint))
+  (let (
+      (listing-data (unwrap! (map-get? marketplace-listings { token-id: token-id })
+        ERR_LISTING_NOT_FOUND
+      ))
+      (sale-price (get price listing-data))
+      (seller (get seller listing-data))
+      (protocol-fee (/ (* sale-price PROTOCOL_FEE) BASIS_POINTS))
+      (seller-proceeds (- sale-price protocol-fee))
+    )
+    ;; Active Listing Validation
+    (asserts! (get is-active listing-data) ERR_LISTING_NOT_FOUND)
+
+    ;; Atomic Financial Settlement
+    (try! (stx-transfer? seller-proceeds tx-sender seller))
+    (try! (stx-transfer? protocol-fee tx-sender (as-contract tx-sender)))
+
+    ;; Asset Ownership Transfer
+    (try! (transfer-ownership token-id tx-sender))
+
+    ;; Protocol Treasury Management
+    (var-set protocol-treasury (+ (var-get protocol-treasury) protocol-fee))
+
+    ;; Marketplace State Update
+    (map-set marketplace-listings { token-id: token-id }
+      (merge listing-data { is-active: false })
+    )
+    (ok true)
+  )
+)
+
+;; FRACTIONAL OWNERSHIP DEMOCRATIZATION SYSTEM
+
+;; Transfer Fractional Asset Shares
+(define-public (transfer-shares
+    (token-id uint)
+    (recipient principal)
+    (share-amount uint)
+  )
+  (let (
+      (sender-shares (unwrap!
+        (map-get? ownership-ledger {
+          token-id: token-id,
+          holder: tx-sender,
+        })
+        ERR_INSUFFICIENT_BALANCE
+      ))
+      (recipient-shares (default-to { share-count: u0 }
+        (map-get? ownership-ledger {
+          token-id: token-id,
+          holder: recipient,
+        })
+      ))
+      (new-recipient-total (unwrap! (safe-add (get share-count recipient-shares) share-amount)
+        ERR_OVERFLOW
+      ))
+    )
+    ;; Transfer Authorization and Validation
+    (asserts! (validate-recipient recipient) ERR_INVALID_RECIPIENT)
+    (asserts! (>= (get share-count sender-shares) share-amount)
+      ERR_INSUFFICIENT_BALANCE
+    )
+
+    ;; Sender Share Balance Update
+    (map-set ownership-ledger {
+      token-id: token-id,
+      holder: tx-sender,
+    } { share-count: (- (get share-count sender-shares) share-amount) }
+    )
+
+    ;; Recipient Share Balance Update
+    (map-set ownership-ledger {
+      token-id: token-id,
+      holder: recipient,
+    } { share-count: new-recipient-total }
+    )
+    (ok true)
+  )
+)
