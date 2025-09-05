@@ -300,3 +300,132 @@
     (ok true)
   )
 )
+
+;; INTELLIGENT YIELD GENERATION & STAKING PROTOCOL
+
+;; Activate Asset Staking for Yield Generation
+(define-public (stake-for-yield (token-id uint))
+  (let ((token-data (unwrap! (map-get? nft-registry { token-id: token-id }) ERR_INVALID_TOKEN)))
+    ;; Staking Authorization Validation
+    (asserts! (is-eq tx-sender (get owner token-data)) ERR_NOT_TOKEN_OWNER)
+    (asserts! (not (get is-staked token-data)) ERR_ALREADY_STAKED)
+
+    ;; Staking State Activation
+    (map-set nft-registry { token-id: token-id }
+      (merge token-data {
+        is-staked: true,
+        stake-height: stacks-block-height,
+      })
+    )
+
+    ;; Yield Tracking Initialization
+    (map-set yield-tracker { token-id: token-id } {
+      accumulated-rewards: u0,
+      last-claim-height: stacks-block-height,
+      total-distributed: u0,
+    })
+
+    ;; Global Staking Metrics Update
+    (var-set total-staked (+ (var-get total-staked) u1))
+    (ok true)
+  )
+)
+
+;; Deactivate Asset Staking and Claim Final Rewards
+(define-public (release-stake (token-id uint))
+  (let ((token-data (unwrap! (map-get? nft-registry { token-id: token-id }) ERR_INVALID_TOKEN)))
+    ;; Unstaking Authorization Validation
+    (asserts! (is-eq tx-sender (get owner token-data)) ERR_NOT_TOKEN_OWNER)
+    (asserts! (get is-staked token-data) ERR_NOT_STAKED)
+
+    ;; Final Reward Distribution
+    (try! (claim-yield-rewards token-id))
+
+    ;; Staking State Deactivation
+    (map-set nft-registry { token-id: token-id }
+      (merge token-data {
+        is-staked: false,
+        stake-height: u0,
+      })
+    )
+
+    ;; Global Staking Metrics Update
+    (var-set total-staked (- (var-get total-staked) u1))
+    (ok true)
+  )
+)
+
+;; Process Accumulated Yield Reward Claims
+(define-private (claim-yield-rewards (token-id uint))
+  (let (
+      (token-data (unwrap! (map-get? nft-registry { token-id: token-id }) ERR_INVALID_TOKEN))
+      (yield-data (unwrap! (map-get? yield-tracker { token-id: token-id }) ERR_NOT_STAKED))
+      (reward-amount (unwrap! (calculate-pending-rewards token-id) ERR_NOT_STAKED))
+    )
+    ;; Token and Staking State Validation
+    (asserts! (get is-staked token-data) ERR_NOT_STAKED)
+
+    ;; Yield Accumulation Reset
+    (map-set yield-tracker { token-id: token-id }
+      (merge yield-data {
+        accumulated-rewards: u0,
+        last-claim-height: stacks-block-height,
+        total-distributed: (+ (get total-distributed yield-data) reward-amount),
+      })
+    )
+
+    ;; Reward Distribution from Protocol Treasury
+    (as-contract (stx-transfer? reward-amount (as-contract tx-sender) (get owner token-data)))
+  )
+)
+
+;; READ-ONLY QUERY & ANALYTICS INTERFACE
+
+;; Retrieve Comprehensive Asset Information
+(define-read-only (get-nft-details (token-id uint))
+  (map-get? nft-registry { token-id: token-id })
+)
+
+;; Retrieve Marketplace Listing Information
+(define-read-only (get-listing-details (token-id uint))
+  (map-get? marketplace-listings { token-id: token-id })
+)
+
+;; Retrieve Fractional Ownership Information
+(define-read-only (get-share-balance
+    (token-id uint)
+    (holder principal)
+  )
+  (map-get? ownership-ledger {
+    token-id: token-id,
+    holder: holder,
+  })
+)
+
+;; Retrieve Yield Generation Status
+(define-read-only (get-yield-status (token-id uint))
+  (map-get? yield-tracker { token-id: token-id })
+)
+
+;; Calculate Real-Time Pending Rewards
+(define-read-only (calculate-pending-rewards (token-id uint))
+  (let (
+      (token-data (unwrap! (map-get? nft-registry { token-id: token-id }) ERR_INVALID_TOKEN))
+      (yield-data (unwrap! (map-get? yield-tracker { token-id: token-id }) ERR_NOT_STAKED))
+      (blocks-staked (- stacks-block-height (get stake-height token-data)))
+      (yield-per-block (/ YIELD_RATE BLOCKS_PER_YEAR))
+      (new-rewards (* blocks-staked yield-per-block))
+    )
+    (ok (+ (get accumulated-rewards yield-data) new-rewards))
+  )
+)
+
+;; Retrieve Global Protocol Analytics
+(define-read-only (get-protocol-stats)
+  {
+    total-nfts: (var-get total-supply),
+    active-stakes: (var-get total-staked),
+    treasury-balance: (var-get protocol-treasury),
+    current-block: stacks-block-height,
+  }
+)
